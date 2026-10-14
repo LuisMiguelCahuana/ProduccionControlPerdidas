@@ -169,18 +169,30 @@ def convertir_fecha(valor):
         dayfirst=True,
         errors="coerce"
     )
-
-
 def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
-    """Busca la última fila que contiene una fecha válida."""
+    """Busca la última fila con datos según el proceso."""
+
+    # SOLO PARA ITINERANTE:
+    # Buscar la última fila con contenido en cualquier columna.
+    if proceso == "Itinerante":
+        datos = df.iloc[fila_datos:, :]
+
+        filas_con_datos = datos.notna().any(axis=1)
+        indices_validos = filas_con_datos[
+            filas_con_datos
+        ].index
+
+        if len(indices_validos) == 0:
+            raise ValueError(
+                "No se encontraron registros en la hoja Itinerante."
+            )
+
+        return int(indices_validos[-1])
+
+    # MANTENER EL COMPORTAMIENTO ORIGINAL DE LOS DEMÁS PROCESOS.
     fechas = df.iloc[fila_datos:, col_fecha].apply(
         convertir_fecha
     )
-
-    if proceso == "Itinerante":
-        fechas = df.iloc[fila_datos:, col_fecha].apply(
-            convertir_fecha
-        )
 
     indices_validos = fechas[fechas.notna()].index
 
@@ -190,6 +202,7 @@ def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
         )
 
     return int(indices_validos[-1])
+
 
 
 def buscar_columnas_base(df, fila_encabezado, proceso):
@@ -394,10 +407,34 @@ def procesar_hoja(
     registros = []
 
     for fila in range(fila_datos, ultima_fila + 1):
-        fecha = convertir_fecha(df.iloc[fila, col_fecha])
+    
+        fecha_original = df.iloc[fila, col_fecha]
+    
+        if proceso == "Itinerante":
+            # No descartar periodos ni listas de días.
+            if pd.isna(fecha_original):
+                continue
+    
+            fecha_texto = str(fecha_original).strip()
+    
+            if not fecha_texto:
+                continue
+    
+            fecha_convertida = convertir_fecha(fecha_texto)
+    
+            if isinstance(fecha_convertida, (pd.Timestamp, datetime)):
+                fecha = fecha_convertida
+            else:
+                # Mantener el contenido original como texto.
+                fecha = fecha_texto
+    
+        else:
+            # Los demás procesos mantienen su comportamiento original.
+            fecha = convertir_fecha(fecha_original)
+    
+            if pd.isna(fecha):
+                continue
 
-        if pd.isna(fecha):
-            continue
 
         if col_suministro is None:
             suministro = ""
@@ -586,9 +623,15 @@ def preparar_valores_sheets(df):
     datos = df.copy()
 
     if "fecha" in datos.columns:
-        datos["fecha"] = pd.to_datetime(
-            datos["fecha"], errors="coerce"
-        ).dt.strftime("%Y-%m-%d")
+        datos["fecha"] = datos["fecha"].apply(
+            lambda valor: (
+                valor.strftime("%Y-%m-%d")
+                if isinstance(valor, (pd.Timestamp, datetime))
+                else str(valor).strip()
+                if pd.notna(valor)
+                else ""
+            )
+        )
 
     datos = datos.astype(object).where(
         pd.notna(datos),
