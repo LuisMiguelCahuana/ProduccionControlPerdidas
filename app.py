@@ -172,9 +172,9 @@ def convertir_fecha(valor):
 def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
     """Busca la última fila con datos según el proceso."""
 
-    # Actividad-CP e Itinerante:
-    # incluir filas con producción aunque la fecha esté vacía.
-    if proceso in ["Actividad-CP", "Itinerante"]:
+    # SOLO PARA ITINERANTE:
+    # Buscar la última fila con contenido en cualquier columna.
+    if proceso == "Itinerante":
         datos = df.iloc[fila_datos:, :]
 
         filas_con_datos = datos.notna().any(axis=1)
@@ -184,12 +184,12 @@ def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
 
         if len(indices_validos) == 0:
             raise ValueError(
-                f"No se encontraron registros en la hoja {proceso}."
+                "No se encontraron registros en la hoja Itinerante."
             )
 
         return int(indices_validos[-1])
 
-    # Los demás procesos mantienen la búsqueda por fecha válida.
+    # MANTENER EL COMPORTAMIENTO ORIGINAL DE LOS DEMÁS PROCESOS.
     fechas = df.iloc[fila_datos:, col_fecha].apply(
         convertir_fecha
     )
@@ -202,6 +202,8 @@ def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
         )
 
     return int(indices_validos[-1])
+
+
 
 def buscar_columnas_base(df, fila_encabezado, proceso):
     """Identifica las columnas de fecha, suministro y cuadrilla."""
@@ -427,10 +429,10 @@ def procesar_hoja(
                 fecha = fecha_texto
     
         else:
-            # En Actividad-CP permitir fechas vacías si hay producción.
+            # Los demás procesos mantienen su comportamiento original.
             fecha = convertir_fecha(fecha_original)
-        
-            if pd.isna(fecha) and proceso != "Actividad-CP":
+    
+            if pd.isna(fecha):
                 continue
 
 
