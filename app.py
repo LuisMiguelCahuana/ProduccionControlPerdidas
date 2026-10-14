@@ -806,14 +806,14 @@ modo_exportacion = st.radio(
 )
 
 if not re.fullmatch(r"\d{6}", periodo_exportacion) or not (
-        1 <= int(periodo_exportacion[4:6]) <= 12
-    ):
-        st.error(
-            "Ingresa un periodo válido en formato AAAAMM, "
-            "por ejemplo: 202609 o 202610."
-        )
+    1 <= int(periodo_exportacion[4:6]) <= 12
+):
+    st.error(
+        "Ingresa un periodo válido en formato AAAAMM, "
+        "por ejemplo: 202609 o 202610."
+    )
 
-    elif not procesos_seleccionados:
+elif not procesos_seleccionados:
         st.error("Selecciona por lo menos un proceso.")
 
     elif not archivo_produccion:
