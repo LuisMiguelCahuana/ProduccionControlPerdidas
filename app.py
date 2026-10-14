@@ -1,4 +1,3 @@
-
 import io
 import re
 import calendar
@@ -53,6 +52,42 @@ COLUMNAS_FINALES = [
     "hoja_origen",
     "archivo_origen",
 ]
+
+# ------------------------------------------------------------
+# ANCHOS FIJOS DE COLUMNAS PARA LA VISTA PREVIA
+# Evita que las columnas se deformen al hacer clic sobre
+# una fila o celda del st.dataframe.
+# ------------------------------------------------------------
+
+CONFIG_COLUMNAS = {
+    "periodo": st.column_config.Column(
+        "Periodo", width="small", pinned=True
+    ),
+    "fecha": st.column_config.Column("Fecha", width="small"),
+    "suministro": st.column_config.Column("Suministro", width="small"),
+    "cuadrilla": st.column_config.Column("Cuadrilla", width="medium"),
+    "zona": st.column_config.Column("Zona", width="small"),
+    "codigo": st.column_config.Column("Código", width="small"),
+    "cantidad": st.column_config.NumberColumn(
+        "Cantidad", width="small", format="%.2f"
+    ),
+    "actividad": st.column_config.Column(
+        "Actividad", width="large"
+    ),
+    "costo_unitario": st.column_config.NumberColumn(
+        "Costo unitario", width="small", format="%.2f"
+    ),
+    "costo_total": st.column_config.NumberColumn(
+        "Costo total", width="small", format="%.2f"
+    ),
+    "proceso": st.column_config.Column("Proceso", width="medium"),
+    "hoja_origen": st.column_config.Column(
+        "Hoja origen", width="medium"
+    ),
+    "archivo_origen": st.column_config.Column(
+        "Archivo origen", width="medium"
+    ),
+}
 
 
 # ============================================================
@@ -170,6 +205,8 @@ def convertir_fecha(valor):
         dayfirst=True,
         errors="coerce"
     )
+
+
 def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
     """Busca la última fila con datos según el proceso."""
 
@@ -203,7 +240,6 @@ def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
         )
 
     return int(indices_validos[-1])
-
 
 
 def buscar_columnas_base(df, fila_encabezado, proceso):
@@ -408,34 +444,33 @@ def procesar_hoja(
     registros = []
 
     for fila in range(fila_datos, ultima_fila + 1):
-    
+
         fecha_original = df.iloc[fila, col_fecha]
-    
+
         if proceso == "Itinerante":
             # No descartar periodos ni listas de días.
             if pd.isna(fecha_original):
                 continue
-    
+
             fecha_texto = str(fecha_original).strip()
-    
+
             if not fecha_texto:
                 continue
-    
+
             fecha_convertida = convertir_fecha(fecha_texto)
-    
+
             if isinstance(fecha_convertida, (pd.Timestamp, datetime)):
                 fecha = fecha_convertida
             else:
                 # Mantener el contenido original como texto.
                 fecha = fecha_texto
-    
+
         else:
             # Los demás procesos mantienen su comportamiento original.
             fecha = convertir_fecha(fecha_original)
-    
+
             if pd.isna(fecha):
                 continue
-
 
         if col_suministro is None:
             suministro = ""
@@ -617,6 +652,8 @@ def conectar_google_sheets():
     cliente = gspread.authorize(credenciales)
 
     return cliente.open_by_key(SPREADSHEET_ID)
+
+
 def preparar_valores_sheets(df):
     """Convierte el DataFrame en valores compatibles con Google Sheets."""
     datos = df.copy()
@@ -648,6 +685,7 @@ def preparar_valores_sheets(df):
     return [
         datos.columns.tolist()
     ] + datos.values.tolist()
+
 
 def exportar_google_sheets(df, modo):
     libro = conectar_google_sheets()
@@ -930,7 +968,18 @@ if st.button(
                 st.dataframe(
                     resumen,
                     use_container_width=True,
-                    hide_index=True
+                    hide_index=True,
+                    column_config={
+                        "proceso": st.column_config.Column(
+                            "Proceso", width="medium"
+                        ),
+                        "hoja_origen": st.column_config.Column(
+                            "Hoja origen", width="medium"
+                        ),
+                        "registros": st.column_config.Column(
+                            "Registros", width="small"
+                        ),
+                    },
                 )
 
                 if cantidad_duplicados:
@@ -951,7 +1000,6 @@ if st.button(
 
         except Exception as e:
             st.error(f"Error durante el procesamiento: {e}")
-
 
 
 # ============================================================
@@ -978,10 +1026,27 @@ if "df_consolidado" in st.session_state:
         f"{df_mostrar['costo_total'].sum(skipna=True):,.2f}"
     )
 
+    # --------------------------------------------------------
+    # Copia para mostrar: la fecha se convierte a texto para
+    # que la celda no cambie de tamaño al ser seleccionada.
+    # --------------------------------------------------------
+    df_vista = df_mostrar.head(500).copy()
+
+    df_vista["fecha"] = df_vista["fecha"].apply(
+        lambda v: (
+            ""
+            if pd.isna(v)
+            else v.strftime("%d/%m/%Y")
+            if isinstance(v, (pd.Timestamp, datetime))
+            else str(v)
+        )
+    )
+
     st.dataframe(
-        df_mostrar.head(500),
+        df_vista,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        column_config=CONFIG_COLUMNAS,
     )
 
     salida_excel = io.BytesIO()
