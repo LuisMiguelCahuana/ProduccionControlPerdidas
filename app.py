@@ -1,10 +1,14 @@
 
 import io
+import re
+import calendar
+import unicodedata
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 import gspread
+
 from google.oauth2.service_account import Credentials
 
 
@@ -13,370 +17,500 @@ from google.oauth2.service_account import Credentials
 # ============================================================
 
 st.set_page_config(
-    page_title="Procesador de Producción y Costos",
+    page_title="Consolidado de Producción y Costos",
     page_icon="📊",
     layout="wide"
 )
 
-# Google Sheets de destino
 SPREADSHEET_ID = "1gNq2nuNGfogcgcq7gsIqmQ5BZmMuWiSgAbDLpytJTIY"
+HOJA_DESTINO = "CONSOLIDADO_GENERAL"
 
-# Pestaña donde se guardarán los datos finales
-HOJA_DESTINO = "Produccion_Costos"
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
-# Hoja del archivo de producción
-HOJA_PRODUCCION = "11-12-13-14 Actividad-CP"
+PROCESOS = {
+    "Actividad-CP": "11-12-13-14 Actividad-CP",
+    "Lecturas": "14 Lecturas ",
+    "Averías": "15. Averias",
+    "Notificaciones": "16. Notific",
+    "Itinerante": "17 Itinerant",
+}
 
-# Zonas válidas
-ZONAS_VALIDAS = ["UB", "UR", "R"]
+COLUMNAS_FINALES = [
+    "fecha",
+    "suministro",
+    "cuadrilla",
+    "zona",
+    "codigo",
+    "cantidad",
+    "actividad",
+    "costo_unitario",
+    "costo_total",
+    "proceso",
+    "hoja_origen",
+    "archivo_origen",
+]
 
 
 # ============================================================
-# ENCABEZADO
+# FUNCIONES GENERALES
 # ============================================================
 
-st.title("📊 PROCESADOR DE PRODUCCIÓN Y COSTOS")
+def normalizar_texto(valor):
+    """Convierte textos a mayúsculas y elimina tildes."""
+    if pd.isna(valor):
+        return ""
 
-st.markdown(
-    """
-    Aplicación para procesar los archivos Excel de producción y costos,
-    calcular los costos totales y exportar el resultado a Google Sheets.
-    """
-)
-
-st.divider()
+    texto = str(valor).strip().upper()
+    texto = unicodedata.normalize("NFKD", texto)
+    return "".join(
+        caracter for caracter in texto
+        if not unicodedata.combining(caracter)
+    )
 
 
-# ============================================================
-# FUNCIONES AUXILIARES
-# ============================================================
-
-def limpiar_texto(valor):
-    """Convierte valores a texto sin espacios innecesarios."""
+def limpiar_codigo(valor):
+    """Evita códigos con .0 al leerlos desde Excel."""
     if pd.isna(valor):
         return ""
 
     texto = str(valor).strip()
 
-    # Evitar códigos como 123.0 cuando Excel los lee como número
-    if texto.endswith(".0") and texto[:-2].isdigit():
+    if re.fullmatch(r"\d+\.0", texto):
         texto = texto[:-2]
 
     return texto
 
 
-def normalizar_codigos(serie):
-    """Normaliza los códigos para facilitar el cruce."""
-    return serie.map(limpiar_texto)
+def normalizar_zona(valor):
+    zona = normalizar_texto(valor)
+
+    equivalencias = {
+        "UB": "UB",
+        "UR": "UR",
+        "R": "R",
+        "URBANO": "UB",
+        "URBANO RURAL": "UR",
+        "RURAL": "R",
+    }
+
+    return equivalencias.get(zona, "")
 
 
-def convertir_a_numero(serie):
-    """Convierte una columna a valores numéricos."""
-    return pd.to_numeric(serie, errors="coerce")
+def convertir_numero(valor):
+    """Convierte números y textos numéricos a formato decimal."""
+    if pd.isna(valor):
+        return None
 
+    if isinstance(valor, (int, float)):
+        return float(valor)
 
-# ============================================================
-# PROCESAR ARCHIVOS EXCEL
-# ============================================================
+    texto = str(valor).strip().replace(" ", "")
 
-def procesar_archivos(
-    archivo_produccion,
-    archivo_costos,
-    hoja_costos
-):
-    # --------------------------------------------------------
-    # 1. LEER ARCHIVO DE PRODUCCIÓN
-    # --------------------------------------------------------
+    if not texto or texto.upper() in {"NAN", "NONE", "-"}:
+        return None
+
+    # Formato peruano: 12.286,46
+    if "," in texto and "." in texto:
+        if texto.rfind(",") > texto.rfind("."):
+            texto = texto.replace(".", "").replace(",", ".")
+        else:
+            texto = texto.replace(",", "")
+
+    elif "," in texto:
+        texto = texto.replace(",", ".")
 
     try:
-        archivo_produccion.seek(0)
+        return float(texto)
+    except (ValueError, TypeError):
+        return None
 
-        df = pd.read_excel(
-            archivo_produccion,
-            sheet_name=HOJA_PRODUCCION,
-            header=None
+
+def convertir_fecha(valor):
+    """Normaliza fechas, incluyendo periodos expresados entre dos fechas."""
+    if pd.isna(valor):
+        return pd.NaT
+
+    if isinstance(valor, (pd.Timestamp, datetime)):
+        return pd.Timestamp(valor).normalize()
+
+    texto = str(valor).strip()
+
+    # Ejemplo: 01/12/2025 al 31/12/2025.
+    if re.search(r"\bal\b", texto, flags=re.IGNORECASE):
+        coincidencias = re.findall(
+            r"\d{1,2}[/-]\d{1,2}[/-]\d{4}",
+            texto
         )
 
-    except ValueError as error:
-        raise ValueError(
-            f"No se encontró la hoja '{HOJA_PRODUCCION}' "
-            "en el archivo de producción."
-        ) from error
+        if coincidencias:
+            fecha_inicio = pd.to_datetime(
+                coincidencias[0],
+                dayfirst=True,
+                errors="coerce"
+            )
 
-    except Exception as error:
-        raise ValueError(
-            f"No se pudo leer el archivo de producción: {error}"
-        ) from error
+            if pd.notna(fecha_inicio):
+                ultimo_dia = calendar.monthrange(
+                    fecha_inicio.year,
+                    fecha_inicio.month
+                )[1]
 
-    # --------------------------------------------------------
-    # 2. ESTRUCTURA DEL ARCHIVO ORIGINAL
-    # --------------------------------------------------------
+                return pd.Timestamp(
+                    fecha_inicio.year,
+                    fecha_inicio.month,
+                    ultimo_dia
+                )
+
+    return pd.to_datetime(
+        texto,
+        dayfirst=True,
+        errors="coerce"
+    )
+
+
+def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
+    """Busca la última fila que contiene una fecha válida."""
+    fechas = df.iloc[fila_datos:, col_fecha].apply(
+        convertir_fecha
+    )
+
+    if proceso == "Itinerante":
+        fechas = df.iloc[fila_datos:, col_fecha].apply(
+            convertir_fecha
+        )
+
+    indices_validos = fechas[fechas.notna()].index
+
+    if len(indices_validos) == 0:
+        raise ValueError(
+            f"No se encontraron fechas válidas en la hoja del proceso {proceso}."
+        )
+
+    return int(indices_validos[-1])
+
+
+def buscar_columnas_base(df, fila_encabezado, proceso):
+    """Identifica las columnas de fecha, suministro y cuadrilla."""
+    col_fecha = None
+    col_suministro = None
+    col_cuadrilla = None
+
+    for col in range(df.shape[1]):
+        encabezado = normalizar_texto(
+            df.iloc[fila_encabezado, col]
+        )
+
+        if "FECHA" in encabezado:
+            col_fecha = col
+
+        if proceso == "Lecturas":
+            if "SUMIN" in encabezado or "OT" in encabezado:
+                col_suministro = col
+
+            if "TECNICO" in encabezado:
+                col_cuadrilla = col
+
+        elif proceso in ["Averías", "Notificaciones"]:
+            encabezado_sin_simbolos = (
+                encabezado.replace("°", "").replace("º", "")
+            )
+
+            if encabezado_sin_simbolos in [
+                "SUMINISTRO",
+                "SUMINISTRO/SED",
+            ]:
+                col_suministro = col
+
+            if any(
+                termino in encabezado_sin_simbolos
+                for termino in [
+                    "CUADRILLA",
+                    "TECNICO",
+                    "TECNICO RESPONSABLE",
+                ]
+            ):
+                col_cuadrilla = col
+
+    if col_fecha is None:
+        raise ValueError(
+            f"No se encontró la columna FECHA en {proceso}."
+        )
+
+    if col_suministro is None:
+        raise ValueError(
+            f"No se encontró SUMINISTRO/OT en {proceso}."
+        )
+
+    if col_cuadrilla is None:
+        raise ValueError(
+            f"No se encontró la columna de técnico o cuadrilla en {proceso}."
+        )
+
+    return col_fecha, col_suministro, col_cuadrilla
+
+
+def detectar_columnas_produccion(
+    df,
+    fila_zona,
+    fila_codigo,
+    proceso
+):
+    """Detecta las columnas de producción y normaliza sus zonas."""
+    zonas_validas = {"UB", "UR", "R"}
+
+    zonas = df.iloc[fila_zona, :].apply(normalizar_zona)
+
+    # En Averías y Notificaciones las zonas pueden estar
+    # escritas en celdas combinadas de Excel.
+    if proceso in ["Averías", "Notificaciones"]:
+        zonas = zonas.replace("", pd.NA).ffill().fillna("")
+
+    columnas = []
+
+    for col in range(df.shape[1]):
+        zona = zonas.iloc[col]
+        codigo = df.iloc[fila_codigo, col]
+
+        if zona in zonas_validas and pd.notna(codigo):
+            codigo_limpio = limpiar_codigo(codigo)
+
+            if codigo_limpio:
+                columnas.append({
+                    "columna": col,
+                    "zona": zona,
+                    "codigo": codigo_limpio,
+                })
+
+    if not columnas:
+        raise ValueError(
+            f"No se detectaron columnas de producción en {proceso}."
+        )
+
+    return columnas
+
+
+# ============================================================
+# PROCESAMIENTO DE CADA HOJA
+# ============================================================
+
+def procesar_hoja(
+    archivo_excel,
+    hoja,
+    proceso,
+    nombre_archivo
+):
+    """Extrae los registros de una hoja y los devuelve en formato común."""
+
+    df = pd.read_excel(
+        io.BytesIO(archivo_excel),
+        sheet_name=hoja,
+        header=None
+    )
 
     fila_zona = 2
     fila_codigo = 3
+    fila_encabezado = 4
     fila_datos = 5
 
-    col_fecha = 1
-    col_suministro = 3
-    col_cuadrilla = 6
+    # --------------------------------------------------------
+    # CONFIGURACIÓN ESPECIAL: ACTIVIDAD-CP
+    # --------------------------------------------------------
+    if proceso == "Actividad-CP":
+        col_fecha = 1
+        col_suministro = 3
+        col_cuadrilla = 6
 
-    if df.shape[0] <= fila_datos:
-        raise ValueError(
-            "El archivo de producción no contiene suficientes filas."
+        ultima_fila = obtener_ultima_fila(
+            df, col_fecha, fila_datos, proceso
         )
 
-    if df.shape[1] <= col_cuadrilla:
-        raise ValueError(
-            "El archivo de producción no contiene las columnas esperadas."
-        )
-
-    # Última fila válida según la columna de fecha
-    ultima_fila = df[col_fecha].last_valid_index()
-
-    if ultima_fila is None or ultima_fila < fila_datos:
-        raise ValueError(
-            "No se encontraron fechas en la columna B del archivo."
+        columnas = detectar_columnas_produccion(
+            df, fila_zona, fila_codigo, proceso
         )
 
     # --------------------------------------------------------
-    # 3. DETECTAR COLUMNAS DE PRODUCCIÓN
+    # CONFIGURACIÓN ESPECIAL: ITINERANTE
     # --------------------------------------------------------
+    elif proceso == "Itinerante":
+        col_fecha = 1
+        col_suministro = None
+        col_cuadrilla = 7
 
-    columnas_validas = []
-    nombres_columnas = []
-
-    for col in range(df.shape[1]):
-
-        zona = limpiar_texto(
-            df.iloc[fila_zona, col]
-        ).upper()
-
-        codigo = limpiar_texto(
-            df.iloc[fila_codigo, col]
+        ultima_fila = obtener_ultima_fila(
+            df, col_fecha, fila_datos, proceso
         )
 
-        if zona in ZONAS_VALIDAS and codigo != "":
-            columnas_validas.append(col)
-            nombres_columnas.append(
-                f"{zona}_{codigo}"
+        columnas = []
+
+        for col in range(df.shape[1]):
+            zona_original = df.iloc[fila_zona, col]
+            codigo = df.iloc[fila_codigo, col]
+
+            zona = normalizar_zona(zona_original)
+
+            if zona and pd.notna(codigo):
+                codigo_limpio = limpiar_codigo(codigo)
+
+                if codigo_limpio:
+                    columnas.append({
+                        "columna": col,
+                        "zona": zona,
+                        "codigo": codigo_limpio,
+                    })
+
+        if not columnas:
+            raise ValueError(
+                "No se detectaron columnas de producción en Itinerante."
             )
 
-    if not columnas_validas:
-        raise ValueError(
-            "No se encontraron columnas de producción "
-            "con zonas UB, UR o R y código válido."
+    # --------------------------------------------------------
+    # CONFIGURACIÓN: LECTURAS, AVERÍAS Y NOTIFICACIONES
+    # --------------------------------------------------------
+    else:
+        (
+            col_fecha,
+            col_suministro,
+            col_cuadrilla,
+        ) = buscar_columnas_base(
+            df,
+            fila_encabezado,
+            proceso
+        )
+
+        ultima_fila = obtener_ultima_fila(
+            df, col_fecha, fila_datos, proceso
+        )
+
+        columnas = detectar_columnas_produccion(
+            df, fila_zona, fila_codigo, proceso
         )
 
     # --------------------------------------------------------
-    # 4. EXTRAER DATOS DE PRODUCCIÓN
+    # GENERAR REGISTROS
     # --------------------------------------------------------
+    registros = []
 
-    rango = slice(
-        fila_datos,
-        ultima_fila + 1
+    for fila in range(fila_datos, ultima_fila + 1):
+        fecha = convertir_fecha(df.iloc[fila, col_fecha])
+
+        if pd.isna(fecha):
+            continue
+
+        if col_suministro is None:
+            suministro = ""
+        else:
+            suministro = df.iloc[fila, col_suministro]
+
+            if pd.isna(suministro):
+                suministro = ""
+            else:
+                suministro = str(suministro).strip()
+
+        cuadrilla = df.iloc[fila, col_cuadrilla]
+
+        if pd.isna(cuadrilla):
+            cuadrilla = ""
+        else:
+            cuadrilla = str(cuadrilla).strip()
+
+        for item in columnas:
+            cantidad_original = df.iloc[
+                fila, item["columna"]
+            ]
+
+            cantidad = convertir_numero(cantidad_original)
+
+            if cantidad is None or cantidad == 0:
+                continue
+
+            registros.append({
+                "fecha": fecha,
+                "suministro": suministro,
+                "cuadrilla": cuadrilla,
+                "zona": item["zona"],
+                "codigo": item["codigo"],
+                "cantidad": cantidad,
+                "actividad": "",
+                "costo_unitario": None,
+                "costo_total": None,
+                "proceso": proceso,
+                "hoja_origen": hoja,
+                "archivo_origen": nombre_archivo,
+            })
+
+    if not registros:
+        return pd.DataFrame(columns=COLUMNAS_FINALES)
+
+    return pd.DataFrame(registros, columns=COLUMNAS_FINALES)
+
+
+# ============================================================
+# PROCESAMIENTO DE COSTOS
+# ============================================================
+
+def procesar_costos(archivo_costos, hoja_costos):
+    df = pd.read_excel(
+        io.BytesIO(archivo_costos),
+        sheet_name=hoja_costos
     )
 
-    df_prod = df.iloc[
-        rango,
-        columnas_validas
-    ].copy()
+    # Normalizar nombres de columnas.
+    mapa_columnas = {}
 
-    df_prod.columns = nombres_columnas
-
-    # --------------------------------------------------------
-    # 5. CREAR COLUMNAS BASE
-    # --------------------------------------------------------
-
-    df_base = pd.DataFrame(
-        {
-            "fecha": pd.to_datetime(
-                df.iloc[rango, col_fecha],
-                errors="coerce"
-            ),
-
-            "suministro": df.iloc[
-                rango, col_suministro
-            ].map(limpiar_texto),
-
-            "cuadrilla": df.iloc[
-                rango, col_cuadrilla
-            ].map(limpiar_texto),
-        },
-        index=df_prod.index
-    )
-
-    df_prod = pd.concat(
-        [df_base, df_prod],
-        axis=1
-    )
-
-    # --------------------------------------------------------
-    # 6. CONVERTIR COLUMNAS A FILAS
-    # --------------------------------------------------------
-
-    df_long = (
-        df_prod
-        .set_index(
-            ["fecha", "suministro", "cuadrilla"]
-        )
-        .stack()
-        .reset_index()
-    )
-
-    df_long.columns = [
-        "fecha",
-        "suministro",
-        "cuadrilla",
-        "zona_codigo",
-        "cantidad"
-    ]
-
-    # Convertir cantidad a número
-    df_long["cantidad"] = convertir_a_numero(
-        df_long["cantidad"]
-    )
-
-    # Eliminar cantidades nulas y ceros
-    df_long = df_long[
-        df_long["cantidad"].notna()
-        & (df_long["cantidad"] != 0)
-    ].copy()
-
-    # --------------------------------------------------------
-    # 7. SEPARAR ZONA Y CÓDIGO
-    # --------------------------------------------------------
-
-    partes = (
-        df_long["zona_codigo"]
-        .astype(str)
-        .str.split("_", n=1, expand=True)
-    )
-
-    df_long["zona"] = partes[0].str.strip().str.upper()
-    df_long["codigo"] = partes[1].map(limpiar_texto)
-
-    df_final = df_long.drop(
-        columns=["zona_codigo"]
-    )
-
-    # --------------------------------------------------------
-    # 8. LEER ARCHIVO DE COSTOS
-    # --------------------------------------------------------
-
-    try:
-        archivo_costos.seek(0)
-
-        df_costos = pd.read_excel(
-            archivo_costos,
-            sheet_name=hoja_costos
-        )
-
-    except Exception as error:
-        raise ValueError(
-            f"No se pudo leer la hoja de costos: {error}"
-        ) from error
-
-    # Limpiar nombres de columnas
-    df_costos.columns = [
-        str(col).strip()
-        for col in df_costos.columns
-    ]
-
-    # Normalizar nombres esperados
-    renombres = {}
-
-    for columna in df_costos.columns:
-
-        nombre = str(columna).strip().upper()
+    for columna in df.columns:
+        nombre = normalizar_texto(columna)
 
         if nombre == "ITEM":
-            renombres[columna] = "codigo"
+            mapa_columnas[columna] = "codigo"
 
-        elif nombre == "ACTIVIDAD/SUBACTIVIDAD":
-            renombres[columna] = "actividad"
+        elif nombre in [
+            "ACTIVIDAD/SUBACTIVIDAD",
+            "ACTIVIDAD / SUBACTIVIDAD",
+        ]:
+            mapa_columnas[columna] = "actividad"
 
-    df_costos = df_costos.rename(
-        columns=renombres
-    )
+        elif nombre in ["UB", "UR", "R"]:
+            mapa_columnas[columna] = nombre
 
-    # Validar columnas obligatorias
-    columnas_requeridas = [
-        "codigo",
-        "actividad",
-        "UB",
-        "UR",
-        "R"
-    ]
+    df = df.rename(columns=mapa_columnas)
 
+    requeridas = ["codigo", "actividad", "UB", "UR", "R"]
     faltantes = [
-        columna
-        for columna in columnas_requeridas
-        if columna not in df_costos.columns
+        columna for columna in requeridas
+        if columna not in df.columns
     ]
 
     if faltantes:
         raise ValueError(
-            "El archivo de costos no contiene estas columnas: "
-            + ", ".join(faltantes)
-            + ". Verifica que tenga ITEM, "
-              "ACTIVIDAD/SUBACTIVIDAD, UB, UR y R."
+            "El archivo de costos no contiene todas las columnas "
+            "necesarias: " + ", ".join(faltantes)
         )
 
-    # --------------------------------------------------------
-    # 9. CONVERTIR COSTOS UB, UR Y R A FILAS
-    # --------------------------------------------------------
+    df = df[requeridas].copy()
 
-    df_costos = df_costos.melt(
+    df["codigo"] = df["codigo"].apply(limpiar_codigo)
+
+    df["actividad"] = df["actividad"].fillna("").astype(str).str.strip()
+
+    for zona in ["UB", "UR", "R"]:
+        df[zona] = df[zona].apply(convertir_numero)
+
+    df_costos = df.melt(
         id_vars=["codigo", "actividad"],
-        value_vars=ZONAS_VALIDAS,
+        value_vars=["UB", "UR", "R"],
         var_name="zona",
         value_name="costo_unitario"
     )
 
-    df_costos["codigo"] = normalizar_codigos(
-        df_costos["codigo"]
-    )
-
-    df_costos["zona"] = (
-        df_costos["zona"]
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-
-    df_costos["actividad"] = (
-        df_costos["actividad"]
-        .map(limpiar_texto)
-    )
-
-    df_costos["costo_unitario"] = convertir_a_numero(
-        df_costos["costo_unitario"]
-    )
-
     df_costos = df_costos.dropna(
         subset=["costo_unitario"]
-    ).copy()
-
-    df_costos = df_costos[
-        df_costos["codigo"] != ""
-    ].copy()
-
-    # --------------------------------------------------------
-    # 10. NORMALIZAR CLAVES PARA EL CRUCE
-    # --------------------------------------------------------
-
-    df_final["codigo"] = normalizar_codigos(
-        df_final["codigo"]
     )
 
-    df_final["zona"] = (
-        df_final["zona"]
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
+    df_costos = df_costos[df_costos["codigo"] != ""]
 
-    # Comprobar claves duplicadas en la tabla de costos
     duplicados = df_costos.duplicated(
         subset=["codigo", "zona"],
         keep=False
@@ -384,366 +518,405 @@ def procesar_archivos(
 
     cantidad_duplicados = int(duplicados.sum())
 
-    # Conservar una sola fila por código y zona.
-    # Esto evita multiplicar registros durante el cruce.
-    df_costos = df_costos.drop_duplicates(
-        subset=["codigo", "zona"],
-        keep="first"
+    if cantidad_duplicados:
+        df_costos = df_costos.drop_duplicates(
+            subset=["codigo", "zona"],
+            keep="first"
+        )
+
+    return df_costos, cantidad_duplicados
+
+
+def cruzar_costos(df_produccion, df_costos):
+    if df_produccion.empty:
+        return df_produccion
+
+    df = df_produccion.copy()
+
+    df["codigo"] = df["codigo"].apply(limpiar_codigo)
+    df_costos = df_costos.copy()
+    df_costos["codigo"] = df_costos["codigo"].apply(limpiar_codigo)
+
+    df = df.drop(
+        columns=["actividad", "costo_unitario", "costo_total"],
+        errors="ignore"
     )
 
-    # --------------------------------------------------------
-    # 11. CRUZAR PRODUCCIÓN CON COSTOS
-    # --------------------------------------------------------
-
-    df_final = df_final.merge(
-        df_costos[
-            [
-                "codigo",
-                "zona",
-                "actividad",
-                "costo_unitario"
-            ]
-        ],
+    df = df.merge(
+        df_costos,
         on=["codigo", "zona"],
-        how="left",
-        validate="many_to_one"
+        how="left"
     )
 
-    # --------------------------------------------------------
-    # 12. CALCULAR COSTO TOTAL
-    # --------------------------------------------------------
-
-    df_final["costo_total"] = (
-        df_final["cantidad"]
-        * df_final["costo_unitario"]
+    df["costo_total"] = (
+        pd.to_numeric(df["cantidad"], errors="coerce")
+        * pd.to_numeric(df["costo_unitario"], errors="coerce")
     )
 
-    # --------------------------------------------------------
-    # 13. ORDENAR COLUMNAS FINALES
-    # --------------------------------------------------------
+    for columna in COLUMNAS_FINALES:
+        if columna not in df.columns:
+            df[columna] = ""
 
-    columnas_finales = [
-        "fecha",
-        "suministro",
-        "cuadrilla",
-        "zona",
-        "codigo",
-        "cantidad",
-        "actividad",
-        "costo_unitario",
-        "costo_total"
-    ]
-
-    df_final = df_final[
-        columnas_finales
-    ].copy()
-
-    return df_final, cantidad_duplicados
+    return df[COLUMNAS_FINALES]
 
 
 # ============================================================
-# CONECTAR CON GOOGLE SHEETS
+# CONEXIÓN CON GOOGLE SHEETS
 # ============================================================
 
 def conectar_google_sheets():
-
     if "gcp_service_account" not in st.secrets:
-        raise RuntimeError(
-            "No se encontraron las credenciales de Google. "
-            "Configura gcp_service_account en "
-            "Streamlit Cloud > Settings > Secrets."
+        raise ValueError(
+            "Falta configurar gcp_service_account en los Secrets "
+            "de Streamlit."
         )
-
-    credenciales_dict = dict(
-        st.secrets["gcp_service_account"]
-    )
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
 
     credenciales = Credentials.from_service_account_info(
-        credenciales_dict,
-        scopes=scopes
+        dict(st.secrets["gcp_service_account"]),
+        scopes=SCOPES
     )
 
-    cliente = gspread.authorize(
-        credenciales
-    )
+    cliente = gspread.authorize(credenciales)
 
-    return cliente
+    return cliente.open_by_key(SPREADSHEET_ID)
 
 
-# ============================================================
-# EXPORTAR RESULTADO A GOOGLE SHEETS
-# ============================================================
+def preparar_valores_sheets(df):
+    """Convierte el DataFrame en valores compatibles con Sheets."""
+    datos = df.copy()
 
-def exportar_google_sheets(df):
+    if "fecha" in datos.columns:
+        datos["fecha"] = pd.to_datetime(
+            datos["fecha"], errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
 
-    cliente = conectar_google_sheets()
-
-    libro = cliente.open_by_key(
-        SPREADSHEET_ID
-    )
-
-    # Buscar la pestaña de destino.
-    # Si no existe, crearla.
-    try:
-        hoja = libro.worksheet(
-            HOJA_DESTINO
-        )
-
-    except gspread.WorksheetNotFound:
-        hoja = libro.add_worksheet(
-            title=HOJA_DESTINO,
-            rows=max(len(df) + 1, 100),
-            cols=max(len(df.columns), 10)
-        )
-
-    # Preparar datos para exportación
-    df_exportar = df.copy()
-
-    if "fecha" in df_exportar.columns:
-        df_exportar["fecha"] = (
-            pd.to_datetime(
-                df_exportar["fecha"],
-                errors="coerce"
-            )
-            .dt.strftime("%Y-%m-%d")
-            .fillna("")
-        )
-
-    # Reemplazar valores vacíos por cadenas vacías
-    df_exportar = df_exportar.astype(object)
-    df_exportar = df_exportar.where(
-        pd.notna(df_exportar),
+    datos = datos.astype(object).where(
+        pd.notna(datos),
         ""
     )
 
-    encabezados = df_exportar.columns.tolist()
+    return [
+        datos.columns.tolist()
+    ] + datos.values.tolist()
 
-    filas = df_exportar.values.tolist()
 
-    # El documento recibe encabezados + registros
-    valores = [encabezados] + filas
+def exportar_google_sheets(df, modo):
+    libro = conectar_google_sheets()
 
-    # Limpiar únicamente la pestaña de destino
-    hoja.clear()
+    try:
+        hoja = libro.worksheet(HOJA_DESTINO)
+    except gspread.WorksheetNotFound:
+        hoja = libro.add_worksheet(
+            title=HOJA_DESTINO,
+            rows=max(len(df) + 100, 1000),
+            cols=len(COLUMNAS_FINALES)
+        )
 
-    # Ajustar tamaño de la hoja
-    hoja.resize(
-        rows=max(len(valores), 1),
-        cols=max(len(encabezados), 1)
-    )
+    valores = preparar_valores_sheets(df)
 
-    # Enviar los datos
-    hoja.update(
-        range_name="A1",
-        values=valores,
+    if modo == "Reemplazar toda la hoja":
+        hoja.clear()
+
+        hoja.resize(
+            rows=max(len(valores), 100),
+            cols=len(COLUMNAS_FINALES)
+        )
+
+        hoja.update(
+            range_name="A1",
+            values=valores,
+            value_input_option="USER_ENTERED"
+        )
+
+        return (
+            f"Se reemplazó el contenido de {HOJA_DESTINO} "
+            f"con {len(df):,} registros."
+        )
+
+    # Modo agregar: crea encabezados si la hoja está vacía.
+    hoja_vacia = not hoja.get_all_values()
+
+    if hoja_vacia:
+        hoja.resize(
+            rows=max(len(valores) + 100, 1000),
+            cols=len(COLUMNAS_FINALES)
+        )
+
+        hoja.update(
+            range_name="A1",
+            values=valores,
+            value_input_option="USER_ENTERED"
+        )
+
+        return (
+            f"Se creó {HOJA_DESTINO} y se agregaron "
+            f"{len(df):,} registros."
+        )
+
+    encabezados_existentes = hoja.row_values(1)
+
+    if encabezados_existentes != COLUMNAS_FINALES:
+        raise ValueError(
+            f"La hoja {HOJA_DESTINO} ya tiene encabezados distintos. "
+            "Usa 'Reemplazar toda la hoja' para unificar su estructura."
+        )
+
+    if len(df) == 0:
+        return "No hay registros nuevos para agregar."
+
+    hoja.append_rows(
+        valores[1:],
         value_input_option="USER_ENTERED"
     )
 
-    return libro.url
+    return (
+        f"Se agregaron {len(df):,} registros a "
+        f"{HOJA_DESTINO}. Recuerda que agregar no elimina duplicados."
+    )
 
 
 # ============================================================
 # INTERFAZ STREAMLIT
 # ============================================================
 
-st.subheader("1. Cargar archivos Excel")
+st.title("📊 CONSOLIDADO DE PRODUCCIÓN Y COSTOS")
+
+st.write(
+    "Procesa las hojas de producción, cruza los costos por código "
+    "y zona, y consolida los resultados en una única pestaña "
+    "de Google Sheets."
+)
+
+st.info(
+    "Sube el libro Excel que contiene las hojas de producción "
+    "y el archivo Excel de costos."
+)
+
+st.subheader("1. Seleccionar procesos")
+
+procesos_seleccionados = st.multiselect(
+    "¿Qué hojas deseas procesar?",
+    options=list(PROCESOS.keys()),
+    default=list(PROCESOS.keys())
+)
+
+st.subheader("2. Cargar archivos")
 
 col1, col2 = st.columns(2)
 
 with col1:
-
     archivo_produccion = st.file_uploader(
-        "📁 Archivo Excel de producción",
+        "Archivo Excel de producción",
         type=["xlsx", "xls", "xlsm"],
         key="produccion"
     )
 
-    st.caption(
-        "Debe contener la hoja: "
-        "11-12-13-14 Actividad-CP"
-    )
-
 with col2:
-
     archivo_costos = st.file_uploader(
-        "📁 Archivo Excel de costos",
+        "Archivo Excel de costos",
         type=["xlsx", "xls", "xlsm"],
         key="costos"
     )
 
-    st.caption(
-        "Debe contener las columnas ITEM, "
-        "ACTIVIDAD/SUBACTIVIDAD, UB, UR y R."
-    )
-
-
-# ============================================================
-# SELECCIONAR HOJA DEL ARCHIVO DE COSTOS
-# ============================================================
-
 hoja_costos = None
 
-if archivo_costos is not None:
-
+if archivo_costos:
     try:
-        archivo_costos.seek(0)
-
-        libro_costos = pd.ExcelFile(
-            archivo_costos
+        excel_costos = pd.ExcelFile(
+            io.BytesIO(archivo_costos.getvalue())
         )
-
-        hojas_costos = libro_costos.sheet_names
 
         hoja_costos = st.selectbox(
-            "Selecciona la hoja del archivo de costos",
-            options=hojas_costos
+            "Seleccionar hoja de costos",
+            options=excel_costos.sheet_names
         )
 
-    except Exception as error:
-        st.error(
-            f"No se pudo identificar la hoja de costos: {error}"
-        )
+    except Exception as e:
+        st.error(f"No se pudo leer el archivo de costos: {e}")
 
+st.subheader("3. Enviar los datos a Google Sheets")
 
-# ============================================================
-# PROCESAR ARCHIVOS
-# ============================================================
+modo_exportacion = st.radio(
+    "¿Cómo deseas guardar los registros?",
+    options=[
+        "Reemplazar toda la hoja",
+        "Agregar al final"
+    ],
+    help=(
+        "Reemplazar borra el contenido anterior de la pestaña destino. "
+        "Agregar conserva lo existente, pero puede duplicar registros "
+        "si procesas los mismos archivos más de una vez."
+    )
+)
 
 if st.button(
-    "⚙️ PROCESAR PRODUCCIÓN Y COSTOS",
+    "🚀 PROCESAR Y CONSOLIDAR",
     type="primary",
     use_container_width=True
 ):
+    if not procesos_seleccionados:
+        st.error("Selecciona por lo menos un proceso.")
 
-    if archivo_produccion is None:
-        st.error(
-            "Primero debes cargar el archivo de producción."
-        )
+    elif not archivo_produccion:
+        st.error("Carga el archivo Excel de producción.")
 
-    elif archivo_costos is None:
-        st.error(
-            "Primero debes cargar el archivo de costos."
-        )
-
-    elif hoja_costos is None:
-        st.error(
-            "Selecciona una hoja del archivo de costos."
-        )
+    elif not archivo_costos or not hoja_costos:
+        st.error("Carga el archivo Excel de costos y selecciona su hoja.")
 
     else:
-
         try:
+            bytes_produccion = archivo_produccion.getvalue()
+            bytes_costos = archivo_costos.getvalue()
 
-            with st.spinner(
-                "Procesando archivos y calculando costos..."
+            nombre_archivo = archivo_produccion.name
+
+            excel_produccion = pd.ExcelFile(
+                io.BytesIO(bytes_produccion)
+            )
+
+            hojas_disponibles = excel_produccion.sheet_names
+
+            resultados = []
+            errores = []
+            progreso = st.progress(0)
+
+            total_procesos = len(procesos_seleccionados)
+
+            for indice, proceso in enumerate(
+                procesos_seleccionados,
+                start=1
             ):
+                hoja_origen = PROCESOS[proceso]
 
-                archivo_produccion.seek(0)
-                archivo_costos.seek(0)
+                if hoja_origen not in hojas_disponibles:
+                    errores.append(
+                        f"{proceso}: no existe la hoja "
+                        f"'{hoja_origen}' en el archivo de producción."
+                    )
+                    progreso.progress(
+                        indice / total_procesos
+                    )
+                    continue
 
-                df_resultado, duplicados = procesar_archivos(
-                    archivo_produccion,
-                    archivo_costos,
+                try:
+                    df_proceso = procesar_hoja(
+                        archivo_excel=bytes_produccion,
+                        hoja=hoja_origen,
+                        proceso=proceso,
+                        nombre_archivo=nombre_archivo
+                    )
+
+                    resultados.append(df_proceso)
+
+                except Exception as e:
+                    errores.append(
+                        f"{proceso}: {str(e)}"
+                    )
+
+                progreso.progress(
+                    indice / total_procesos
+                )
+
+            if not resultados or all(
+                df.empty for df in resultados
+            ):
+                st.error(
+                    "No se obtuvieron registros para consolidar."
+                )
+
+                for error in errores:
+                    st.warning(error)
+
+            else:
+                df_produccion = pd.concat(
+                    resultados,
+                    ignore_index=True
+                )
+
+                df_costos, cantidad_duplicados = procesar_costos(
+                    bytes_costos,
                     hoja_costos
                 )
 
-                st.session_state["resultado"] = df_resultado
-                st.session_state["duplicados"] = duplicados
+                df_final = cruzar_costos(
+                    df_produccion,
+                    df_costos
+                )
 
-            st.success(
-                "Los archivos se procesaron correctamente."
-            )
+                df_final = df_final[COLUMNAS_FINALES]
 
-        except Exception as error:
+                st.session_state["df_consolidado"] = df_final
 
-            st.error(
-                f"Error al procesar los archivos: {error}"
-            )
+                st.success(
+                    f"Procesamiento completado: "
+                    f"{len(df_final):,} registros."
+                )
+
+                resumen = (
+                    df_final.groupby(
+                        ["proceso", "hoja_origen"],
+                        dropna=False
+                    )
+                    .size()
+                    .reset_index(name="registros")
+                )
+
+                st.subheader("Resumen por proceso")
+                st.dataframe(
+                    resumen,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                if cantidad_duplicados:
+                    st.warning(
+                        f"El archivo de costos tenía "
+                        f"{cantidad_duplicados} filas involucradas "
+                        "en códigos/zona duplicados. Se conservó "
+                        "la primera coincidencia por código y zona."
+                    )
+
+                if errores:
+                    st.warning(
+                        "Algunos procesos no pudieron procesarse:"
+                    )
+
+                    for error in errores:
+                        st.write(f"- {error}")
+
+        except Exception as e:
+            st.error(f"Error durante el procesamiento: {e}")
 
 
 # ============================================================
-# MOSTRAR RESULTADOS
+# VISTA PREVIA Y DESCARGA
 # ============================================================
 
-if "resultado" in st.session_state:
-
-    df_resultado = st.session_state["resultado"]
-
-    cantidad_duplicados = st.session_state.get(
-        "duplicados",
-        0
-    )
-
-    if cantidad_duplicados > 0:
-
-        st.warning(
-            f"Se encontraron {cantidad_duplicados} filas "
-            "involucradas en claves código/zona duplicadas "
-            "en el archivo de costos. Se conservó la primera "
-            "coincidencia de cada clave para evitar duplicar "
-            "registros de producción."
-        )
+if "df_consolidado" in st.session_state:
+    df_mostrar = st.session_state["df_consolidado"]
 
     st.divider()
+    st.subheader("4. Vista previa del consolidado")
 
-    st.subheader("2. Resumen del procesamiento")
+    c1, c2, c3 = st.columns(3)
 
-    registros_sin_costo = int(
-        df_resultado["costo_unitario"].isna().sum()
-    )
-
-    costo_total = df_resultado[
-        "costo_total"
-    ].sum()
-
-    cantidad_total = df_resultado[
-        "cantidad"
-    ].sum()
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-        "Registros procesados",
-        f"{len(df_resultado):,}"
-    )
+    c1.metric("Total de registros", f"{len(df_mostrar):,}")
 
     c2.metric(
-        "Cantidad total",
-        f"{cantidad_total:,.2f}"
+        "Registros con costo",
+        f"{df_mostrar['costo_unitario'].notna().sum():,}"
     )
 
     c3.metric(
         "Costo total",
-        f"{costo_total:,.2f}"
+        f"{df_mostrar['costo_total'].sum(skipna=True):,.2f}"
     )
-
-    c4.metric(
-        "Registros sin costo",
-        f"{registros_sin_costo:,}"
-    )
-
-    st.subheader("3. Vista previa")
 
     st.dataframe(
-        df_resultado.head(500),
+        df_mostrar.head(500),
         use_container_width=True,
         hide_index=True
     )
-
-    if len(df_resultado) > 500:
-        st.caption(
-            "Se muestran los primeros 500 registros. "
-            "La exportación incluye todos los registros."
-        )
-
-    # ========================================================
-    # DESCARGAR EXCEL FINAL
-    # ========================================================
 
     salida_excel = io.BytesIO()
 
@@ -751,23 +924,16 @@ if "resultado" in st.session_state:
         salida_excel,
         engine="openpyxl"
     ) as writer:
-
-        df_resultado.to_excel(
+        df_mostrar.to_excel(
             writer,
             index=False,
-            sheet_name="Resultado"
+            sheet_name="Consolidado"
         )
 
-    nombre_archivo = (
-        "produccion_costos_"
-        + datetime.now().strftime("%Y%m%d_%H%M%S")
-        + ".xlsx"
-    )
-
     st.download_button(
-        label="⬇️ DESCARGAR RESULTADO EN EXCEL",
+        label="📥 Descargar consolidado en Excel",
         data=salida_excel.getvalue(),
-        file_name=nombre_archivo,
+        file_name="CONSOLIDADO_GENERAL.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
@@ -775,63 +941,34 @@ if "resultado" in st.session_state:
         use_container_width=True
     )
 
-    # ========================================================
-    # EXPORTAR A GOOGLE SHEETS
-    # ========================================================
-
-    st.divider()
-
-    st.subheader("4. Exportar a Google Sheets")
-
-    st.warning(
-        f"Se actualizará únicamente la pestaña "
-        f"'{HOJA_DESTINO}'. Su contenido anterior será "
-        "reemplazado por los resultados actuales."
-    )
-
     if st.button(
-        "📤 EXPORTAR A GOOGLE SHEETS",
+        "☁️ EXPORTAR A GOOGLE SHEETS",
         type="primary",
         use_container_width=True
     ):
-
         try:
-
             with st.spinner(
-                "Exportando registros a Google Sheets..."
+                "Enviando registros a Google Sheets..."
             ):
-
-                url_google = exportar_google_sheets(
-                    df_resultado
+                mensaje = exportar_google_sheets(
+                    df_mostrar,
+                    modo_exportacion
                 )
 
-            st.success(
-                f"Se exportaron {len(df_resultado):,} registros "
-                f"a la pestaña '{HOJA_DESTINO}'."
+            st.success(mensaje)
+
+            st.link_button(
+                "Abrir Google Sheets",
+                (
+                    "https://docs.google.com/spreadsheets/d/"
+                    + SPREADSHEET_ID
+                    + "/edit"
+                ),
+                use_container_width=True
             )
 
-            st.markdown(
-                f"[📄 ABRIR GOOGLE SHEETS]({url_google})"
-            )
-
-        except Exception as error:
-
+        except Exception as e:
             st.error(
                 "No se pudo exportar a Google Sheets. "
-                "Verifica que la cuenta de servicio tenga "
-                "permiso de Editor y que los Secrets estén "
-                f"configurados correctamente. Detalle: {error}"
+                f"Detalle: {e}"
             )
-
-
-# ============================================================
-# PIE DE PÁGINA
-# ============================================================
-
-st.divider()
-
-st.caption(
-    "Procesador de Producción y Costos | "
-    "La exportación solo modifica la pestaña "
-    "'Produccion_Costos' del documento de destino."
-)
