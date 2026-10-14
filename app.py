@@ -170,13 +170,15 @@ def convertir_fecha(valor):
         errors="coerce"
     )
 def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
-    """Busca la última fila con datos según el proceso."""
+    """
+    Busca la última fila con contenido para Actividad-CP e Itinerante.
+    Los demás procesos mantienen la búsqueda por fecha válida.
+    """
 
-    # SOLO PARA ITINERANTE:
-    # Buscar la última fila con contenido en cualquier columna.
-    if proceso == "Itinerante":
+    if proceso in ["Actividad-CP", "Itinerante"]:
         datos = df.iloc[fila_datos:, :]
 
+        # Considerar filas que tengan contenido en cualquier columna.
         filas_con_datos = datos.notna().any(axis=1)
         indices_validos = filas_con_datos[
             filas_con_datos
@@ -184,12 +186,13 @@ def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
 
         if len(indices_validos) == 0:
             raise ValueError(
-                "No se encontraron registros en la hoja Itinerante."
+                f"No se encontraron registros en la hoja {proceso}."
             )
 
         return int(indices_validos[-1])
 
-    # MANTENER EL COMPORTAMIENTO ORIGINAL DE LOS DEMÁS PROCESOS.
+    # Mantener la lógica original para Lecturas, Averías
+    # y Notificaciones.
     fechas = df.iloc[fila_datos:, col_fecha].apply(
         convertir_fecha
     )
@@ -202,8 +205,6 @@ def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
         )
 
     return int(indices_validos[-1])
-
-
 
 def buscar_columnas_base(df, fila_encabezado, proceso):
     """Identifica las columnas de fecha, suministro y cuadrilla."""
@@ -411,29 +412,36 @@ def procesar_hoja(
         fecha_original = df.iloc[fila, col_fecha]
     
         if proceso == "Itinerante":
-            # No descartar periodos ni listas de días.
+            # Conservar fechas, periodos y listas de días.
             if pd.isna(fecha_original):
                 continue
-    
+        
             fecha_texto = str(fecha_original).strip()
-    
+        
             if not fecha_texto:
                 continue
-    
+        
             fecha_convertida = convertir_fecha(fecha_texto)
-    
-            if isinstance(fecha_convertida, (pd.Timestamp, datetime)):
+        
+            if (
+                pd.notna(fecha_convertida)
+                and isinstance(fecha_convertida, (pd.Timestamp, datetime))
+            ):
                 fecha = fecha_convertida
             else:
-                # Mantener el contenido original como texto.
                 fecha = fecha_texto
-    
-        else:
-            # Los demás procesos mantienen su comportamiento original.
+        
+        elif proceso == "Actividad-CP":
+            # Actividad-CP debe conservar producción aunque no tenga fecha.
             fecha = convertir_fecha(fecha_original)
-    
+        
+        else:
+            # Los demás procesos mantienen la validación original.
+            fecha = convertir_fecha(fecha_original)
+        
             if pd.isna(fecha):
                 continue
+
 
 
         if col_suministro is None:
