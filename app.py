@@ -39,6 +39,7 @@ PROCESOS = {
 }
 
 COLUMNAS_FINALES = [
+    "periodo",
     "fecha",
     "suministro",
     "cuadrilla",
@@ -783,6 +784,13 @@ if archivo_costos:
         st.error(f"No se pudo leer el archivo de costos: {e}")
 
 st.subheader("3. Enviar los datos a Google Sheets")
+periodo_exportacion = st.text_input(
+    "Periodo de exportación (Año y mes)",
+    value="202610",
+    max_chars=6,
+    placeholder="Ejemplo: 202609",
+    help="Ingresa el periodo en formato AAAAMM. Ejemplo: 202609 para septiembre de 2026."
+).strip()
 
 modo_exportacion = st.radio(
     "¿Cómo deseas guardar los registros?",
@@ -797,12 +805,15 @@ modo_exportacion = st.radio(
     )
 )
 
-if st.button(
-    "🚀 PROCESAR Y CONSOLIDAR",
-    type="primary",
-    use_container_width=True
-):
-    if not procesos_seleccionados:
+if not re.fullmatch(r"\d{6}", periodo_exportacion) or not (
+        1 <= int(periodo_exportacion[4:6]) <= 12
+    ):
+        st.error(
+            "Ingresa un periodo válido en formato AAAAMM, "
+            "por ejemplo: 202609 o 202610."
+        )
+
+    elif not procesos_seleccionados:
         st.error("Selecciona por lo menos un proceso.")
 
     elif not archivo_produccion:
@@ -890,7 +901,11 @@ if st.button(
                     df_produccion,
                     df_costos
                 )
-
+                
+                # Agregar el periodo seleccionado a todas las filas.
+                df_final["periodo"] = periodo_exportacion
+                
+                # Ordenar las columnas con periodo como primera columna.
                 df_final = df_final[COLUMNAS_FINALES]
 
                 st.session_state["df_consolidado"] = df_final
