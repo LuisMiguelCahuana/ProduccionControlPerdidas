@@ -805,15 +805,20 @@ modo_exportacion = st.radio(
     )
 )
 
-if not re.fullmatch(r"\d{6}", periodo_exportacion) or not (
-    1 <= int(periodo_exportacion[4:6]) <= 12
+if st.button(
+    "🚀 PROCESAR Y CONSOLIDAR",
+    type="primary",
+    use_container_width=True
 ):
-    st.error(
-        "Ingresa un periodo válido en formato AAAAMM, "
-        "por ejemplo: 202609 o 202610."
-    )
+    if not re.fullmatch(r"\d{6}", periodo_exportacion) or not (
+        1 <= int(periodo_exportacion[4:6]) <= 12
+    ):
+        st.error(
+            "Ingresa un periodo válido en formato AAAAMM, "
+            "por ejemplo: 202609 o 202610."
+        )
 
-elif not procesos_seleccionados:
+    elif not procesos_seleccionados:
         st.error("Selecciona por lo menos un proceso.")
 
     elif not archivo_produccion:
@@ -852,9 +857,7 @@ elif not procesos_seleccionados:
                         f"{proceso}: no existe la hoja "
                         f"'{hoja_origen}' en el archivo de producción."
                     )
-                    progreso.progress(
-                        indice / total_procesos
-                    )
+                    progreso.progress(indice / total_procesos)
                     continue
 
                 try:
@@ -868,13 +871,9 @@ elif not procesos_seleccionados:
                     resultados.append(df_proceso)
 
                 except Exception as e:
-                    errores.append(
-                        f"{proceso}: {str(e)}"
-                    )
+                    errores.append(f"{proceso}: {str(e)}")
 
-                progreso.progress(
-                    indice / total_procesos
-                )
+                progreso.progress(indice / total_procesos)
 
             if not resultados or all(
                 df.empty for df in resultados
@@ -901,14 +900,17 @@ elif not procesos_seleccionados:
                     df_produccion,
                     df_costos
                 )
-                
-                # Agregar el periodo seleccionado a todas las filas.
+
+                # Asignar el periodo a todos los registros.
                 df_final["periodo"] = periodo_exportacion
-                
-                # Ordenar las columnas con periodo como primera columna.
+
+                # Periodo será la primera columna.
                 df_final = df_final[COLUMNAS_FINALES]
 
                 st.session_state["df_consolidado"] = df_final
+
+                # Guardar el periodo usado para este consolidado.
+                st.session_state["periodo_consolidado"] = periodo_exportacion
 
                 st.success(
                     f"Procesamiento completado: "
@@ -949,6 +951,7 @@ elif not procesos_seleccionados:
 
         except Exception as e:
             st.error(f"Error durante el procesamiento: {e}")
+
 
 
 # ============================================================
