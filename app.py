@@ -616,32 +616,37 @@ def conectar_google_sheets():
     cliente = gspread.authorize(credenciales)
 
     return cliente.open_by_key(SPREADSHEET_ID)
-
-
 def preparar_valores_sheets(df):
-    """Convierte el DataFrame en valores compatibles con Sheets."""
+    """Convierte el DataFrame en valores compatibles con Google Sheets."""
     datos = df.copy()
 
     if "fecha" in datos.columns:
-        datos["fecha"] = datos["fecha"].apply(
-            lambda valor: (
-                valor.strftime("%Y-%m-%d")
-                if isinstance(valor, (pd.Timestamp, datetime))
-                else str(valor).strip()
-                if pd.notna(valor)
-                else ""
-            )
-        )
 
+        def preparar_fecha(valor):
+            # Primero comprobar si el valor está vacío o es NaT.
+            if pd.isna(valor):
+                return ""
+
+            # Fechas reales: convertir a texto YYYY-MM-DD.
+            if isinstance(valor, (pd.Timestamp, datetime)):
+                return valor.strftime("%Y-%m-%d")
+
+            # Periodos y listas de días de Itinerante:
+            # conservarlos como texto.
+            return str(valor).strip()
+
+        datos["fecha"] = datos["fecha"].apply(preparar_fecha)
+
+    # Convertir los demás valores NaN, NaT y None en celdas vacías.
     datos = datos.astype(object).where(
         pd.notna(datos),
         ""
     )
 
+    # Devolver encabezados y filas para Google Sheets.
     return [
         datos.columns.tolist()
     ] + datos.values.tolist()
-
 
 def exportar_google_sheets(df, modo):
     libro = conectar_google_sheets()
