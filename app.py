@@ -457,9 +457,12 @@ def procesar_hoja(
         cuadrilla = df.iloc[fila, col_cuadrilla]
 
         if pd.isna(cuadrilla):
-            cuadrilla = ""
-        else:
-            cuadrilla = str(cuadrilla).strip()
+            continue
+        
+        cuadrilla = str(cuadrilla).strip()
+        
+        if not cuadrilla or cuadrilla.upper() in ["NAN", "NONE", "NULL"]:
+            continue
 
         for item in columnas:
             cantidad_original = df.iloc[
@@ -668,7 +671,24 @@ def exportar_google_sheets(df, modo):
             cols=len(COLUMNAS_FINALES)
         )
 
-    valores = preparar_valores_sheets(df)
+    # Excluir registros cuya cuadrilla esté vacía.
+    df_exportar = df.copy()
+    
+    df_exportar["cuadrilla"] = (
+        df_exportar["cuadrilla"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    
+    df_exportar = df_exportar[
+        ~df_exportar["cuadrilla"].str.upper().isin(
+            ["", "NAN", "NONE", "NULL"]
+        )
+    ].copy()
+    
+    valores = preparar_valores_sheets(df_exportar)
+
 
     if modo == "Reemplazar toda la hoja":
         hoja.clear()
