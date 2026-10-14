@@ -170,15 +170,13 @@ def convertir_fecha(valor):
         errors="coerce"
     )
 def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
-    """
-    Busca la última fila con contenido para Actividad-CP e Itinerante.
-    Los demás procesos mantienen la búsqueda por fecha válida.
-    """
+    """Busca la última fila con datos según el proceso."""
 
-    if proceso in ["Actividad-CP", "Itinerante"]:
+    # SOLO PARA ITINERANTE:
+    # Buscar la última fila con contenido en cualquier columna.
+    if proceso == "Itinerante":
         datos = df.iloc[fila_datos:, :]
 
-        # Considerar filas que tengan contenido en cualquier columna.
         filas_con_datos = datos.notna().any(axis=1)
         indices_validos = filas_con_datos[
             filas_con_datos
@@ -186,13 +184,12 @@ def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
 
         if len(indices_validos) == 0:
             raise ValueError(
-                f"No se encontraron registros en la hoja {proceso}."
+                "No se encontraron registros en la hoja Itinerante."
             )
 
         return int(indices_validos[-1])
 
-    # Mantener la lógica original para Lecturas, Averías
-    # y Notificaciones.
+    # MANTENER EL COMPORTAMIENTO ORIGINAL DE LOS DEMÁS PROCESOS.
     fechas = df.iloc[fila_datos:, col_fecha].apply(
         convertir_fecha
     )
@@ -205,6 +202,8 @@ def obtener_ultima_fila(df, col_fecha, fila_datos, proceso):
         )
 
     return int(indices_validos[-1])
+
+
 
 def buscar_columnas_base(df, fila_encabezado, proceso):
     """Identifica las columnas de fecha, suministro y cuadrilla."""
@@ -412,36 +411,29 @@ def procesar_hoja(
         fecha_original = df.iloc[fila, col_fecha]
     
         if proceso == "Itinerante":
-            # Conservar fechas, periodos y listas de días.
+            # No descartar periodos ni listas de días.
             if pd.isna(fecha_original):
                 continue
-        
+    
             fecha_texto = str(fecha_original).strip()
-        
+    
             if not fecha_texto:
                 continue
-        
+    
             fecha_convertida = convertir_fecha(fecha_texto)
-        
-            if (
-                pd.notna(fecha_convertida)
-                and isinstance(fecha_convertida, (pd.Timestamp, datetime))
-            ):
+    
+            if isinstance(fecha_convertida, (pd.Timestamp, datetime)):
                 fecha = fecha_convertida
             else:
+                # Mantener el contenido original como texto.
                 fecha = fecha_texto
-        
-        elif proceso == "Actividad-CP":
-            # Actividad-CP debe conservar producción aunque no tenga fecha.
-            fecha = convertir_fecha(fecha_original)
-        
+    
         else:
-            # Los demás procesos mantienen la validación original.
+            # Los demás procesos mantienen su comportamiento original.
             fecha = convertir_fecha(fecha_original)
-        
+    
             if pd.isna(fecha):
                 continue
-
 
 
         if col_suministro is None:
@@ -457,12 +449,9 @@ def procesar_hoja(
         cuadrilla = df.iloc[fila, col_cuadrilla]
 
         if pd.isna(cuadrilla):
-            continue
-        
-        cuadrilla = str(cuadrilla).strip()
-        
-        if not cuadrilla or cuadrilla.upper() in ["NAN", "NONE", "NULL"]:
-            continue
+            cuadrilla = ""
+        else:
+            cuadrilla = str(cuadrilla).strip()
 
         for item in columnas:
             cantidad_original = df.iloc[
@@ -671,24 +660,7 @@ def exportar_google_sheets(df, modo):
             cols=len(COLUMNAS_FINALES)
         )
 
-    # Excluir registros cuya cuadrilla esté vacía.
-    df_exportar = df.copy()
-    
-    df_exportar["cuadrilla"] = (
-        df_exportar["cuadrilla"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-    
-    df_exportar = df_exportar[
-        ~df_exportar["cuadrilla"].str.upper().isin(
-            ["", "NAN", "NONE", "NULL"]
-        )
-    ].copy()
-    
-    valores = preparar_valores_sheets(df_exportar)
-
+    valores = preparar_valores_sheets(df)
 
     if modo == "Reemplazar toda la hoja":
         hoja.clear()
